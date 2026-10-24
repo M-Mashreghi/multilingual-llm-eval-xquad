@@ -68,30 +68,106 @@ Outputs (tables, JSON, charts) are written to `results/`.
 
 ## Results
 
-`results/summary.md` holds the full tables. Per-question predictions (including verifier
-verdicts and revisions) are in `results/predictions/` for error analysis.
+**Setup:** `Qwen/Qwen2.5-0.5B-Instruct` with greedy decoding, 100 parallel XQuAD questions in each of
+6 languages (`en, es, de, ar, ru, zh`) = 600 questions per method. The same model plays generator,
+verifier and reviser. All raw outputs are in [`results/results/`](results/results/): `metrics.json`, `summary.md` and
+per-question predictions.
 
-| Method | EM | F1 | Evidence faithf. | Explanation faithf. | EN − non-EN (F1) | Cross-lingual agreement |
-|---|---:|---:|---:|---:|---:|---:|
-| direct | | | | | | |
-| modular | | | | | | |
+### Per-language scores (direct baseline)
 
-![Scores by language](results/scores_by_language.png)
+| Language | EM | F1 | Fuzzy | Answer in context | Evidence faithf. | Explanation faithf. | Valid JSON |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| English (en) | 0.48 | 0.655 | 0.731 | 0.90 | 0.859 | 0.667 | 0.98 |
+| Spanish (es) | 0.31 | 0.496 | 0.593 | 0.78 | 0.810 | 0.564 | 0.90 |
+| German (de) | 0.33 | 0.483 | 0.599 | 0.79 | 0.800 | 0.626 | 0.95 |
+| Arabic (ar) | 0.22 | **0.342** | 0.538 | 0.69 | **0.653** | 0.510 | 0.85 |
+| Russian (ru) | 0.22 | 0.355 | **0.514** | **0.60** | 0.788 | **0.476** | **0.76** |
+| Chinese (zh)* | **0.58** | **0.753** | **0.751** | 0.82 | 0.786 | **0.814** | 0.96 |
+| **All** | 0.357 | 0.514 | 0.621 | 0.763 | 0.783 | 0.609 | 0.90 |
 
-## Discussion points
+\* Chinese F1 is computed at character level, which is more lenient than word-level F1. Its EM is
+also the highest, though, so the strong Chinese result is not just a scoring artefact.
 
-- **Why accuracy isn't enough:** two systems with the same F1 can differ widely in whether
-  their evidence and explanations are real. That matters for any user who trusts the
-  explanation.
-- **Does verification help?** Compare F1 before and after revision on revised rows, and check
-  whether "Supported" answers really are more accurate than "Unsupported" ones. If they aren't,
-  the verifier is not discriminating.
-- **Same model as generator and verifier:** a model tends to share the blind spots of the answer
-  it is checking (correlated errors), and a 0.5B model has limited ability to judge faithfulness.
-  Self-verification also costs 2–3× the compute of a direct answer.
-- **Language bias as a fairness issue:** if non-English users systematically get worse and
-  less faithful answers from the same product, that is an equity problem, not just a
-  benchmark artefact.
+### Direct vs. modular (Generator → Verifier → Reviser)
+
+| Method | EM | F1 | Answer in context | Evidence faithf. | Explanation faithf. | Cross-lingual agreement | All 6 correct | All 6 wrong |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Direct | 0.357 | 0.514 | 0.763 | 0.783 | 0.609 | 0.605 | 11% | 7% |
+| Modular | 0.358 | 0.517 | 0.767 | 0.784 | 0.610 | 0.611 | 12% | 7% |
+
+| Verifier diagnostics (600 questions) | Value |
+|---|---:|
+| Verdicts: Supported / Unsupported / Uncertain | 99.5% / 0.5% / 0% |
+| Answers revised | 3 of 600 |
+| Initial F1 when the verifier said *Supported* | 0.517 (same as the overall F1) |
+| F1 of the 3 revised answers: before → after | 0.00 → 0.56 |
+
+![Scores by language](results/results/scores_by_language.png)
+
+![Verifier verdicts](results/results/verifier_verdicts.png)
+
+<p float="left">
+  <img src="results/results/consistency_heatmap_direct.png" width="48%" />
+  <img src="results/results/consistency_heatmap_modular.png" width="48%" />
+</p>
+
+## Analysis
+
+**1. Accuracy alone hides most of the picture.** Overall F1 is 0.51, but only 76% of answers are
+verbatim spans of the context, even though the prompt requires extractive answers. On average, only ~61% of the
+content words in an explanation appear in the context, question or answer; the rest is wording the
+model brought in itself. F1 alone shows neither problem.
+
+**2. There is a large language gap, and English is not on top.** F1 ranges from 0.34 (Arabic) to
+0.75 (Chinese), a gap of **0.41**. English (0.655) beats the four other non-Chinese languages by
+**0.24 F1** on average (vs. 0.42 for es/de/ar/ru), but Chinese beats English. This is consistent
+with Qwen's heavily English- and Chinese-weighted training data, and it is a reminder that "language
+bias" is about each model's training mix, not just "English vs. the rest". Arabic and Russian, the
+two non-Latin, non-Chinese scripts, are the weakest on almost every metric.
+
+**3. The model is not consistent across languages.** The same question, translated, gets a
+consistent outcome only **60.5%** of the time on average across language pairs. Only **11%** of
+questions are answered correctly in all six languages (7% are wrong in all six). The lowest pairwise
+agreement is English–Arabic (0.49), roughly a coin flip. For a 0.5B model, whether a question gets
+answered correctly depends heavily on the language it is asked in.
+
+**4. Instruction following degrades outside English, and it compounds the gap.** Valid-JSON output
+drops from 98% (en) to 76% (ru), and Russian answers are ~40% longer than the gold spans (33 vs. 23
+characters) and the least often copied from the context (60%). The model tends to paraphrase
+instead of extracting. Parsing failures are **not** the main cause of the gap, though: the tolerant
+fallback parser recovers most answers, and scoring only correctly parsed outputs moves Russian F1
+from 0.355 to just 0.397.
+
+**5. Self-verification with the same 0.5B model does almost nothing.** The verifier labelled
+**99.5%** of answers *Supported*, so it is effectively a rubber stamp. Its *Supported* answers have
+exactly the same average F1 as all answers (0.517), meaning it does not tell right from wrong. All 3
+revisions it triggered were cases where the generator had produced broken JSON (the "answer" was the
+literal text "```json"): 2 were fixed, 1 replaced with a different wrong answer. The pipeline
+therefore costs **~2× the inference** for **+0.003 F1**. This matches the concern in the assignment:
+when one model is both generator and verifier, the verifier shares the generator's blind spots
+(correlated errors). A 0.5B model also lacks the reasoning needed to check faithfulness, and is
+biased toward agreeing with an answer it is shown.
+
+**6. Language bias as a fairness issue.** Speakers of Arabic and Russian would get answers that are
+roughly half as accurate, less often grounded in the source, and less often correctly formatted
+than English or Chinese speakers using the same system. If deployed, this is an equity problem (the
+"language-based bias" dimension of DecodingTrust), not just a benchmark artefact.
+
+### Limitations
+
+- One small model (0.5B), 100 questions per language, single run with greedy decoding.
+- Evidence and explanation faithfulness are lexical heuristics (span matching and token overlap),
+  not semantic judgements, so paraphrased but correct explanations are penalised.
+- Character-level F1 for Chinese is not directly comparable to word-level F1 for other languages.
+- Prompts are in English for every language, which may itself disadvantage some languages.
+
+### Next steps
+
+- Use a **stronger or separate verifier** (e.g. Qwen2.5-1.5B/3B) to test whether verification helps
+  once the errors are no longer correlated.
+- Use a stricter verifier prompt, or have it quote the supporting span instead of giving a free-form
+  verdict, to counter the "always Supported" behaviour.
+- Use native-language prompts, more languages (hi, th, tr), and larger samples with multiple seeds.
 
 ## References
 
